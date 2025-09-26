@@ -60,17 +60,28 @@ impl TryFrom<&[u8; 256]> for Header {
 }
 
 impl Header {
-    pub fn encode_bytes(index_policy: IndexPolicy, ip_version: IpVersion) -> Bytes {
+    pub fn new(index_policy: IndexPolicy, ip_version: IpVersion) -> Header {
+        Header {
+            version: VERSION_NO,
+            index_policy,
+            create_time: chrono::Utc::now().timestamp() as u32,
+            start_index_ptr: 0,
+            end_index_ptr: 0,
+            ip_version,
+            runtime_ptr_bytes: RUNTIME_PTR_SIZE,
+        }
+    }
+
+    pub fn encode_bytes(&self, start_index_ptr: u32, end_index_ptr: u32) -> Bytes {
         let mut buf = BytesMut::with_capacity(HEADER_INFO_LENGTH);
         buf.put_u16_le(VERSION_NO);
-        buf.put_u16_le(index_policy as u16);
-        buf.put_u32_le(chrono::Utc::now().timestamp() as u32);
-        // index block start ptr
-        buf.put_u32_le(0);
+        buf.put_u16_le(self.index_policy as u16);
+        buf.put_u32_le(self.create_time);
+        buf.put_u32_le(start_index_ptr);
         // index block end ptr
-        buf.put_u32_le(0);
-        buf.put_u16_le(ip_version as u16);
-        buf.put_u16_le(RUNTIME_PTR_SIZE);
+        buf.put_u32_le(end_index_ptr);
+        buf.put_u16_le(self.ip_version as u16);
+        buf.put_u16_le(self.runtime_ptr_bytes);
         buf.freeze()
     }
 }

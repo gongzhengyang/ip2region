@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -53,23 +51,24 @@ fn region_filter(region: &str, filter_fields: &[usize]) -> Result<String> {
 
 impl Segment {
     pub fn from_file(
-        src_file: &File,
+        src_filepath: &str,
         ip_version: IpVersion,
         filter_fields: &[usize],
     ) -> Result<Vec<Segment>> {
-        let reader = BufReader::new(src_file);
-        let mut last = None;
+        let buf = std::fs::read_to_string(src_filepath)?;
+        info!("Read src file");
 
+        let mut last = None;
         let mut segments = vec![];
-        for line in reader
+        for line in buf
             .lines()
-            .filter_map(|result| result.ok().map(|l| l.trim().to_owned()))
+            .map(|l| l.trim())
             .filter(|line| !line.is_empty() && !line.starts_with("#"))
         {
             trace!(?line, "Processing line");
             let v = line.splitn(3, '|').collect::<Vec<_>>();
             if v.len() != 3 {
-                return Err(MakerError::ParseIPRegion(line));
+                return Err(MakerError::ParseIPRegion(line.to_owned()));
             }
             let (start_ip, end_ip, region) = (v[0], v[1], v[2]);
             let start_ip = IpAddr::from_str(start_ip)?;
@@ -122,26 +121,22 @@ impl Segment {
             .filter_map(|index| {
                 let sip = if index == start_byte {
                     self.start_ip
+                } else if self.start_ip.is_ipv4() {
+                    IpAddr::from(Ipv4Addr::from((index as u32) << 16 ))
                 } else {
-                    if self.start_ip.is_ipv4() {
-                        IpAddr::from(Ipv4Addr::from((index as u32) << 16 ))
-                    } else {
-                        IpAddr::from(Ipv6Addr::from((index as u128) << 112 ))
-                    }
+                    IpAddr::from(Ipv6Addr::from((index as u128) << 112 ))
                 };
 
                 let eip = if index == end_byte {
                     self.end_ip
+                } else if self.start_ip.is_ipv4() {
+                    let mask = (1 << 16) -1;
+                    let v = (index as u32) << 16;
+                    IpAddr::from(Ipv4Addr::from(v | mask))
                 } else {
-                    if self.start_ip.is_ipv4() {
-                        let mask = (1 << 16) -1;
-                        let v = (index as u32) << 16;
-                        IpAddr::from(Ipv4Addr::from(v | mask))
-                    } else {
-                        let mask = (1 << 112) - 1;
-                        let v = (index as u128) << 112;
-                        IpAddr::from(Ipv6Addr::from(v | mask))
-                    }
+                    let mask = (1 << 112) - 1;
+                    let v = (index as u128) << 112;
+                    IpAddr::from(Ipv6Addr::from(v | mask))
                 };
 
                 trace!(?index, ?sip, ?eip, ?self.region, "in split segment");

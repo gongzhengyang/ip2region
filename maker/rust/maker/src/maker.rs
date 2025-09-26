@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::{BufMut, BytesMut};
 use itertools::Itertools;
 use num_traits::Zero;
-use tracing::{debug, info, trace};
+use tracing::{info, trace};
 
 use crate::error::{MakerError, Result};
 use crate::header::{IPAddrExt, IndexPolicy, IpVersion, VECTOR_INDEX_ROWS};
@@ -21,6 +21,7 @@ pub struct Maker {
     region_pool: HashMap<Arc<String>, u32>,
     vector_index: [[[u8; VECTOR_INDEX_SIZE]; VECTOR_INDEX_ROWS]; VECTOR_INDEX_COLS],
     segments: Vec<Segment>,
+    header: Header,
 }
 
 impl Maker {
@@ -31,26 +32,20 @@ impl Maker {
         end_filepath: &str,
         filter_fields: Vec<usize>,
     ) -> Result<Self> {
-        let src_file = File::open(src_filepath)?;
-        info!(src_filepath, "Opened src file");
+        let header = Header::new(index_policy, ip_version);
 
-        let mut dst_file = File::create(end_filepath)?;
-        dst_file.seek(SeekFrom::Start(0))?;
-        let buf = Header::encode_bytes(index_policy, ip_version);
-        debug!(?buf, "Encoding header");
-        dst_file.write_all(buf.as_ref())?;
-
-        let segments = Segment::from_file(&src_file, ip_version, &filter_fields)?;
+        let segments = Segment::from_file(src_filepath, ip_version, &filter_fields)?;
         if segments.is_empty() {
             return Err(MakerError::EmptySegments);
         }
 
         Ok(Self {
             ip_version,
-            dst_file,
+            dst_file: File::create(end_filepath)?,
             region_pool: HashMap::new(),
             vector_index: [[[0; VECTOR_INDEX_SIZE]; VECTOR_INDEX_ROWS]; VECTOR_INDEX_COLS],
             segments,
+            header,
         })
     }
 
@@ -58,11 +53,15 @@ impl Maker {
         self.dst_file.seek(SeekFrom::Start(
             (HEADER_INFO_LENGTH + VECTOR_INDEX_LENGTH) as u64,
         ))?;
+        let mut current = u32::try_from(self.dst_file.stream_position()?)?;
+        let mut buf = BytesMut::new();
         for region in self.segments.iter().map(|s| s.region.clone()).unique() {
-            let current = self.dst_file.stream_position()?;
-            self.dst_file.write_all(region.as_bytes())?;
-            self.region_pool.insert(region, u32::try_from(current)?);
+            buf.extend_from_slice(region.as_bytes());
+            let region_len = region.len() as u32;
+            self.region_pool.insert(region, current);
+            current += region_len;
         }
+        self.dst_file.write_all(buf.as_ref())?;
         Ok(())
     }
 
@@ -84,10 +83,12 @@ impl Maker {
         self.load_region_pool()?;
 
         let start_index_ptr = u32::try_from(self.dst_file.stream_position()?)?;
-        let mut end_index_ptr = 0;
+        let mut current_index_ptr = u32::try_from(self.dst_file.stream_position()?)?;
 
         let mut count = 0;
         let segments = std::mem::take(&mut self.segments);
+
+        let mut buf = BytesMut::new();
         for segment in segments {
             let region_ptr = *self
                 .region_pool
@@ -97,9 +98,7 @@ impl Maker {
 
             trace!(?segment, "before segment split");
             for seg in segment.split()? {
-                let pos = u32::try_from(self.dst_file.stream_position()?)?;
-                end_index_ptr = pos;
-                self.set_vector_index(&seg.start_ip.ipaddr_bytes(), pos)?;
+                self.set_vector_index(&seg.start_ip.ipaddr_bytes(), current_index_ptr)?;
 
                 let mut index_buf = BytesMut::with_capacity(self.ip_version.segment_index_size());
                 index_buf.put_slice(&seg.start_ip.encode_ipaddr_bytes());
@@ -107,26 +106,25 @@ impl Maker {
                 index_buf.put_u16_le(region_len);
                 index_buf.put_u32_le(region_ptr);
                 trace!(?index_buf, ?seg, "Finished split segment");
-                self.dst_file.write_all(index_buf.as_ref())?;
-
+                current_index_ptr += index_buf.len() as u32;
+                buf.extend_from_slice(&index_buf);
                 count += 1;
             }
         }
 
+        self.dst_file.write_all(buf.as_ref())?;
         self.dst_file
             .seek(SeekFrom::Start(HEADER_INFO_LENGTH as u64))?;
         self.dst_file
             .write_all(self.vector_index.as_flattened().as_flattened())?;
 
-        let mut index_buf = BytesMut::new();
-        index_buf.put_u32_le(start_index_ptr);
-        index_buf.put_u32_le(end_index_ptr);
-        self.dst_file.seek(SeekFrom::Start(8))?;
+        let index_buf = self.header.encode_bytes(start_index_ptr, current_index_ptr);
+        self.dst_file.seek(SeekFrom::Start(0))?;
         self.dst_file.write_all(index_buf.as_ref())?;
 
         info!(
             start_index_ptr,
-            end_index_ptr,
+            current_index_ptr,
             region_pool_len = self.region_pool.len(),
             count,
             "Write done"
