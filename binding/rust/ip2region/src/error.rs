@@ -12,9 +12,6 @@ pub enum Ip2RegionError {
     #[error("No matched Ipaddress")]
     NoMatchedIP,
 
-    #[error("Header parse error: {0}")]
-    HeaderParsed(String),
-
     #[error("Searcher load IPv4 data, couldn't search IPv6 data")]
     OnlyIPv4Version,
 
